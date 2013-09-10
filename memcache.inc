@@ -19,6 +19,13 @@ class MemCacheDrupal implements DrupalCacheInterface {
     $this->reloadVariables();
   }
 
+  function getRemoteConnection() {
+    if (!isset($this->remoteConnection)) {
+      $this->remoteConnection = dmemcache_object_remote($this->bin);
+    }
+    return $this->remoteConnection();
+  }
+
   function get($cid) {
     $cache = dmemcache_get($cid, $this->bin, $this->memcache);
     return $this->valid($cid, $cache) ? $cache : FALSE;
@@ -227,6 +234,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
       $cids = is_array($cid) ? $cid : array($cid);
       foreach ($cids as $cid) {
         dmemcache_delete($cid, $this->bin, $this->memcache);
+        dmemcache_delete($cid, $this->bin, $this->getRemoteConnection());
       }
     }
   }
@@ -348,6 +356,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
         $wildcards[$this->bin][$key] = 1;
       }
       dmemcache_set($key, $wildcards[$this->bin][$key], 0, $this->bin);
+      dmemcache_set($key, $wildcards[$this->bin][$key], 0, $this->bin, $this->getRemoteConnection());
     }
     return $matching;
   }
