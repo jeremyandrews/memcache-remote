@@ -236,6 +236,10 @@ function sess_destroy_uid($uid) {
     dmemcache_delete($user->sid, 'session');
   }
   dmemcache_delete($uid, 'users');
+  // Custom addition for symantec - clear the user_load() cache too.
+  // @todo: have memcache share the user_load() cache if possible instead of
+  // maintaining two caches.
+  cache_clear_all("user/$uid", 'cache_user');
 }
 
 function sess_gc($lifetime) {

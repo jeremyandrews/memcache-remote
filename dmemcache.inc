@@ -46,6 +46,25 @@ function dmemcache_set($key, $value, $exp = 0, $bin = 'cache') {
 }
 
 /**
+ *  Place an item into remote memcache
+ */
+function dmemcache_set_remote($key, $value, $exp = 0, $bin = 'cache') {
+  global $_memcache_statistics;
+  $_memcache_statistics['set'][] = $key;
+  $_memcache_statistics['bins'][] = $bin;
+  if ($mc = dmemcache_object_remote($bin)) {
+    $full_key = dmemcache_key($key, $bin);
+    if (class_exists('Memcached')) {
+      return $mc->set($full_key, $value, $exp);
+    }
+    else {
+      return $mc->set($full_key, $value, MEMCACHE_COMPRESSED, $exp);
+    }
+  }
+  return FALSE;
+}
+
+/**
  *  Add an item into memcache
  *
  * @param $key The string with which you will retrieve this item later.
@@ -176,6 +195,22 @@ function dmemcache_delete($key, $bin = 'cache') {
   }
   $_memcache_statistics[] = array('delete', $bin, $full_key, (int)$success);
   return $success;
+}
+
+/**
+ * Deletes an item from a remote cache.
+ *
+ * @param $key The key with which the item was stored.
+ * @param $bin The bin in which the item was stored.
+ *
+ * @return Returns TRUE on success or FALSE on failure.
+ */
+function dmemcache_delete_remote($key, $bin = 'cache') {
+  if ($mc = dmemcache_object_remote($bin)) {
+    $full_key = dmemcache_key($key, $bin);
+    return $mc->delete($full_key);
+  }
+  return FALSE;
 }
 
 /**
@@ -389,6 +424,167 @@ function dmemcache_object($bin = NULL, $flush = FALSE) {
             }
             else {
               $memcache->addServer($host, $port, $memcache_persistent);
+            }
+          }
+          // Using the Memcached PECL extension.
+          else if ($memcache->addServer($host, $port) && !$init) {
+            $init = TRUE;
+          }
+        }
+      }
+
+      if ($init) {
+        // Map the current bin with the new Memcache object.
+        $memcacheCache[$bin] = $memcache;
+
+        // Now that all the servers have been mapped to this cluster, look for
+        // other bins that belong to the cluster and map them too.
+        foreach ($memcache_bins as $b => $c) {
+          if ($c == $cluster && $b != $bin) {
+            // Map this bin and cluster by reference.
+            $memcacheCache[$b] = &$memcacheCache[$bin];
+          }
+        }
+      }
+    }
+  }
+
+  return empty($memcacheCache[$bin]) ? FALSE : $memcacheCache[$bin];
+}
+
+
+/**
+ * Returns an Memcache object based on the bin requested. Note that there is
+ * nothing preventing developers from calling this function directly to get the
+ * Memcache object. Do this if you need functionality not provided by this API
+ * or if you need to use legacy code. Otherwise, use the dmemcache (get, set,
+ * delete, flush) API functions provided here.
+ *
+ * @param $bin The bin which is to be used.
+ *
+ * @param $flush Rebuild the bin/server/cache mapping.
+ *
+ * @return an Memcache object or FALSE.
+ */
+function dmemcache_object_remote($bin = NULL, $flush = FALSE) {
+  static $extension, $memcacheCache = array(), $memcache_servers, $memcache_bins, $memcache_persistent;
+
+  if (!isset($extension)) {
+    // If an extension is specified in settings.php, use that when available.
+    $preferred = ucfirst(strtolower((variable_get('memcache_extension', NULL))));
+    if (isset($preferred) && class_exists($preferred)) {
+      $extension = $preferred;
+    }
+    // If no extension is set, default to Memcache.
+    // The Memcached extension has some features that the older extension lacks
+    // but also an unfixed bug that affects cache clears.
+    // @see http://pecl.php.net/bugs/bug.php?id=16829
+    elseif (class_exists('Memcache')) {
+      $extension = 'Memcache';
+    }
+    elseif (class_exists('Memcached')) {
+      $extension = 'Memcached';
+    }
+  }
+
+  if ($flush) {
+    foreach ($memcacheCache as $cluster) {
+      $cluster->close();
+    }
+    $memcacheCache = array();
+  }
+
+  if (empty($memcacheCache) || empty($memcacheCache[$bin])) {
+    // $memcache_servers and $memcache_bins originate from settings.php.
+    // $memcache_servers_custom and $memcache_bins_custom get set by
+    // memcache.module. They are then merged into $memcache_servers and
+    // $memcache_bins, which are statically cached for performance.
+    if (empty($memcache_servers)) {
+      // Values from settings.php
+      // NB. This is an exact copy of dmemcache_object except for the
+      // following line.
+      $memcache_servers = variable_get('memcache_remote_servers', array());
+      $memcache_bins    = variable_get('memcache_bins', array('cache' => 'default'));
+    }
+
+    // If there is no cluster for this bin in $memcache_bins, cluster is 'default'.
+    $cluster = empty($memcache_bins[$bin]) ? 'default' : $memcache_bins[$bin];
+
+    // If this bin isn't in our $memcache_bins configuration array, and the
+    // 'default' cluster is already initialized, map the bin to 'cache' because
+    // we always map the 'cache' bin to the 'default' cluster.
+    if (empty($memcache_bins[$bin]) && !empty($memcacheCache['cache'])) {
+      $memcacheCache[$bin] = &$memcacheCache['cache'];
+    }
+    else {
+      // Create a new Memcache object. Each cluster gets its own Memcache
+      // object.
+      if ($extension == 'Memcached') {
+        $memcache = new Memcached;
+        $default_opts = array(
+          Memcached::OPT_COMPRESSION => FALSE,
+          Memcached::OPT_DISTRIBUTION => Memcached::DISTRIBUTION_CONSISTENT,
+        );
+        foreach ($default_opts as $key => $value) {
+          $memcache->setOption($key, $value);
+        }
+        // See README.txt for setting custom Memcache options when using the
+        // memcached PECL extension.
+        $memconf = variable_get('memcache_options', array());
+        foreach ($memconf as $key => $value) {
+          $memcache->setOption($key, $value);
+        }
+      }
+      elseif ($extension == 'Memcache') {
+        $memcache = new Memcache;
+      }
+      else {
+        drupal_set_message('You must enable the PECL memcached or memcache extension to use memcache.inc.', 'error');
+        return;
+      }
+
+      // Indicate whether to connect to memcache using a persistent connection.
+      // Note: this only affects the Memcache PECL extension, and does not
+      // affect the Memcached PECL extension.  For a detailed explanation see:
+      //  http://drupal.org/node/822316#comment-4427676
+      if (!isset($memcache_persistent)) {
+        $memcache_persistent = variable_get('memcache_persistent', FALSE);
+      }
+
+      // A variable to track whether we've connected to the first server.
+      $init = FALSE;
+
+      // Link all the servers to this cluster.
+      foreach ($memcache_servers as $s => $c) {
+        if ($c == $cluster) {
+          list($host, $port) = explode(':', $s);
+
+          // Support unix sockets in the format 'unix:///path/to/socket'.
+          if ($host == 'unix') {
+            // When using unix sockets use the full path for $host.
+            $host = $s;
+            // Port is always 0 for unix sockets.
+            $port = 0;
+          }
+
+          // Using the Memcache PECL extension.
+          if ($memcache instanceof Memcache) {
+            // When using the PECL memcache extension, we must use ->(p)connect 
+            // for the first connection.
+            // For remote connections, allow up to 2 seconds instead of the
+            // default 1 for connections to reduce the chance of timeouts.
+            // While this can lead to reduced performance, it should only
+            // happen on cache writes and is necessary for cache consistency.
+            if (!$init) {
+              if ($memcache_persistent && $memcache->pconnect($host, $port, 2)) {
+                $init = TRUE;
+              }
+              elseif (!$memcache_persistent && $memcache->connect($host, $port, 2)) {
+                $init = TRUE;
+              }
+            }
+            else {
+              $memcache->addServer($host, $port, $memcache_persistent, 1, 2);
             }
           }
           // Using the Memcached PECL extension.

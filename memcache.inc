@@ -37,6 +37,12 @@ function cache_get($cid, $table = 'cache') {
     return _cache_get($cid, $table);
   }
 
+  // memcache-remote custom logic.
+  // Cache misses in cache_get() are recorded in a global to attempt
+  // to distinguish between 'lazy' and 'write-through' caches. Each time
+  // cache_get() is called, reset the global for this cid/table combination.
+  unset($GLOBALS['memcache_cache_miss'][$table][$cid]);
+
   // Retrieve the item from the cache.
   $cache = dmemcache_get($cid, $table);
 
@@ -95,9 +101,13 @@ function cache_get($cid, $table = 'cache') {
       // then it is possible for $cache->flushes to be greater than the return
       // of memcache_wildcard_flushes().
       if ($flushes > $recorded_flushes) {
-        // Delete the cache item entirely, it will be set again with the correct
-        // number of flushes.
-        dmemcache_delete($cid, $table);
+        // dmemcache-remote custom logic.
+        if (lock_acquire("memcache_sync_$table")) {
+          // Resync subkeys with remote memcache instance
+          memcache_wildcards($cid, $table, FALSE, TRUE);
+          lock_release("memcache_sync_$table");
+        }
+        // Rebuild the cache item.
         $cache = FALSE;
       }
     }
@@ -109,6 +119,10 @@ function cache_get($cid, $table = 'cache') {
   // On cache misses, attempt to avoid stampedes when the
   // memcache_stampede_protection variable is enabled.
   if (!$cache) {
+    // memcache-remote custom logic.
+    // Record cache misses in a global, this allows for basic distinction
+    // between lazy and write through caches.
+    $GLOBALS['memcache_cache_miss'][$table][$cid] = TRUE;
     if (variable_get('memcache_stampede_protection', FALSE) && !lock_acquire("memcache_$cid:$table", variable_get('memcache_stampede_semaphore', 15))) {
       // Prevent any single request from waiting more than three times due to
       // stampede protection. By default this is a maximum total wait of 15
@@ -218,6 +232,19 @@ function cache_set($cid, $data, $table = 'cache', $expire = CACHE_PERMANENT, $he
     $memcache_expire = $cache->expire + (($cache->expire - $_SERVER['REQUEST_TIME']) * 2);
   }
   dmemcache_set($cid, $cache, $memcache_expire, $table);
+
+  // memcache-remote custom logic.
+  // Caches should be written to the remote server in only two cases:
+  // - the variables cache, since this is used to track internal memcache
+  //   metadata about cache flushes.
+  // - caches being set that were not recorded as a cache miss in cache_get()
+  //   this should support write-through caching as long as there is a fallback
+  //   for empty cache entries. We do not support code without a fallback for
+  //   empty entries since these could become inconsistent due to other issues
+  //   such as a restart or eviction.
+  if ($cid == 'variables' || empty($GLOBALS['memcache_cache_miss'][$table][$cid])) {
+    dmemcache_set_remote($cid, $cache, $memcache_expire, $table);
+  }
   if (isset($GLOBALS['locks']["memcache_$cid:$table"])) {
     lock_release("memcache_$cid:$table");
   }
@@ -294,6 +321,7 @@ function cache_clear_all($cid = NULL, $table = NULL, $wildcard = FALSE) {
   }
   else {
     dmemcache_delete($cid, $table);
+    dmemcache_delete_remote($cid, $table);
   }
 }
 
@@ -311,10 +339,17 @@ function memcache_wildcard_flushes($cid, $table) {
  * statically so multiple cache requests for the same item on the same page
  * load doesn't add overhead.
  */
-function memcache_wildcards($cid, $table, $flush = FALSE) {
+function memcache_wildcards($cid, $table, $flush = FALSE, $sync_remote = FALSE) {
   static $wildcards = array();
   $matching = array();
   $length = strlen($cid);
+
+  /**
+   * Flush static cache, we need to sync to the remote servers.
+   */
+  if ($sync_remote) {
+    $wildcards = array();
+  }
 
   $wildcard_flushes = variable_get('memcache_wildcard_flushes', array());
   $wildcard_invalidate = variable_get('memcache_wildcard_invalidate', MEMCACHE_WILDCARD_INVALIDATE);
@@ -354,6 +389,26 @@ function memcache_wildcards($cid, $table, $flush = FALSE) {
     // Do a multi-get to retrieve all possibly matching wildcard flushes.
     if (!empty($lookup)) {
       $values = dmemcache_get_multi($lookup, $table);
+
+      // Resyncing individual lookup keys to remote server
+      if ($sync_remote) {
+        $mc_remote = dmemcache_object_remote($table);
+        if ($mc_remote) {
+          $values_remote = dmemcache_get_multi($lookup, $table, $mc_remote);
+        }
+        if (is_array($values_remote)) {
+          foreach ($values_remote as $key => $value) {
+            if (!isset($values[$key]) || $value != $values[$key]) {
+              // @todo: this doesn't take into account prefixes, or keys that
+              // are > hashed due to being >250 characters.
+              $inner_key = urldecode(substr($key, strlen($table) + 1));
+              $rc = dmemcache_set($inner_key, $value, 0, $table);
+            }
+          }
+        }
+        // Use synchronized values to rebuild wildcards array
+        $values = dmemcache_get_multi($lookup, $table);
+      }
       if (is_array($values)) {
         // Build an array of matching wildcards.
         $matching = array_merge($matching, $values);
@@ -414,11 +469,17 @@ function memcache_wildcards($cid, $table, $flush = FALSE) {
       if ($mc) {
         $mc->increment($wildcard);
       }
+      $mc_remote = dmemcache_object_remote($table);
+      if ($mc_remote) {
+        $mc_remote->increment($wildcard);
+      }
+
       $wildcards[$table][$wildcard]++;
     }
     else {
       $wildcards[$table][$wildcard] = 1;
       dmemcache_set('.wildcard-' . $cid, '1', 0, $table);
+      dmemcache_set_remote('.wildcard-' . $cid, '1', 0, $table);
     }
   }
   return $matching;
