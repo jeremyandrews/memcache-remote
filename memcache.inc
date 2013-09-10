@@ -19,6 +19,11 @@ class MemCacheDrupal implements DrupalCacheInterface {
     $this->reloadVariables();
   }
 
+  /**
+   * Get a remote memcache connection.
+   *
+   * @see dmemcache_object_remote().
+   */
   function getRemoteConnection() {
     if (!isset($this->remoteConnection)) {
       $this->remoteConnection = dmemcache_object_remote($this->bin);
@@ -27,6 +32,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
   }
 
   function get($cid) {
+    unset($this->misses[$cid]);
     $cache = dmemcache_get($cid, $this->bin, $this->memcache);
     return $this->valid($cid, $cache) ? $cache : FALSE;
   }
@@ -94,6 +100,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
     // On cache misses, attempt to avoid stampedes when the
     // memcache_stampede_protection variable is enabled.
     if (!$cache) {
+      $this->misses[$cid] = TRUE;
       if (variable_get('memcache_stampede_protection', FALSE) && !lock_acquire("memcache_$cid:$this->bin", variable_get('memcache_stampede_semaphore', 15))) {
         // Prevent any single request from waiting more than three times due to
         // stampede protection. By default this is a maximum total wait of 15
@@ -155,6 +162,13 @@ class MemCacheDrupal implements DrupalCacheInterface {
     }
     else {
       $memcache_expire = $cache->expire + (($cache->expire - REQUEST_TIME) * 2);
+    }
+
+    // Variables is used internally by memcache so always write it to both
+    // servers. Where a cache item is being written without having been a
+    // cache miss, assume it is pre-generation and write to the remote.
+    if ($cid == 'variables' || !empty($this->misses[$cid])) {
+      dmemcache_set($cid, $cache, $memcache_expire, $this->bin, $this->getRemoteConnection());
     }
     dmemcache_set($cid, $cache, $memcache_expire, $this->bin, $this->memcache);
   }
@@ -253,8 +267,12 @@ class MemCacheDrupal implements DrupalCacheInterface {
    * statically so multiple cache requests for the same item on the same page
    * load doesn't add overhead.
    */
-  protected function wildcards($cid, $flush = FALSE) {
+  protected function wildcards($cid, $flush = FALSE, $sync_remote = FALSE) {
     static $wildcards = array();
+
+    if ($sync_remote) {
+      $wildcards = array();
+    }
     $matching = array();
 
     $length = strlen($cid);
@@ -292,6 +310,25 @@ class MemCacheDrupal implements DrupalCacheInterface {
       // Do a multi-get to retrieve all possibly matching wildcard flushes.
       if (!empty($lookup)) {
         $values = dmemcache_get_multi($lookup, $this->bin, $this->memcache);
+        // Resyncing individual lookup keys to remote server
+        if ($sync_remote) {
+          $mc_remote = $this->getRemoteConnection();
+          if ($mc_remote) {
+            $values_remote = dmemcache_get_multi($lookup, $this->bin, $mc_remote);
+          }
+          if (is_array($values_remote)) {
+            foreach ($values_remote as $key => $value) {
+              if (!isset($values[$key]) || $value != $values[$key]) {
+                // @todo: this doesn't take into account prefixes, or keys that
+                // are > hashed due to being >250 characters.
+                $inner_key = urldecode(substr($key, strlen($this->bin) + 1));
+                $rc = dmemcache_set($inner_key, $value, 0, $this->bin, $mc_remote);
+              }
+            }
+          }
+          // Use synchronized values to rebuild wildcards array
+          $values = dmemcache_get_multi($lookup, $this->bin);
+        }
         if (is_array($values)) {
           // Prepare an array of matching wildcards.
           $matching = array_merge($matching, $values);
@@ -371,6 +408,15 @@ class MemCacheDrupal implements DrupalCacheInterface {
     if ($flushes < (int)$this->wildcard_flushes($cid)) {
       return FALSE;
     }
+    // memcache-remote custom logic.
+    // If wildcards were lost since the cache item was stored, invalidate the
+    // item and reset wildcards on the remote server.
+    elseif ($flushes > (int) $this->wildcard_flushes($cid)) {
+      if (lock_acquire("memcache_sync_$this->bin")) {
+        $this->wildcards($cid, FALSE, TRUE);
+        lock_release("memcache_sync_$this->bin");
+      }
+    }
     return TRUE;
   }
 
@@ -392,6 +438,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
     $this->cache_flush = variable_get('cache_flush_' . $this->bin);
     $this->cache_content_flush = variable_get('cache_content_flush_' . $this->bin, 0);
     $this->flushed = min($this->cache_flush, REQUEST_TIME - $this->cache_lifetime);
+    $this->misses = array();
   }
 
   /**
