@@ -28,7 +28,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
     if (!isset($this->remoteConnection)) {
       $this->remoteConnection = dmemcache_object_remote($this->bin);
     }
-    return $this->remoteConnection();
+    return $this->remoteConnection;
   }
 
   function get($cid) {

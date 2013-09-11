@@ -466,7 +466,7 @@ function dmemcache_object($bin = NULL, $flush = FALSE) {
  *
  * @return an Memcache object or FALSE.
  */
-function dmemcache_object($bin = NULL, $flush = FALSE) {
+function dmemcache_object_remote($bin = NULL, $flush = FALSE) {
   static $extension, $memcacheCache = array(), $memcache_servers, $memcache_bins, $memcache_persistent, $failed_connection_cache;
 
   if (!isset($extension)) {
@@ -509,7 +509,7 @@ function dmemcache_object($bin = NULL, $flush = FALSE) {
     // $memcache_bins, which are statically cached for performance.
     if (empty($memcache_servers)) {
       // Values from settings.php
-      $memcache_servers = variable_get('memcache_servers', array('127.0.0.1:11211' => 'default'));
+      $memcache_servers = variable_get('memcache_servers_remote', array('127.0.0.1:11211' => 'default'));
       $memcache_bins    = variable_get('memcache_bins', array('cache' => 'default'));
     }
 
