@@ -24,8 +24,8 @@ is important.
  2. Install your chosen PECL memcache extension -- this is the memcache client
     library which will be used by the Drupal memcache module to interact with
     the memcached server(s). Generally PECL memcache (3.0.6+) is recommended,
-    but PECL memcached (2.0.1+) also works well for some people. Use of older
-    versions may cause problems.
+    but PECL memcached (2.0.1+) also works well for some people. There are
+    known issues with older version.
  3. Put your site into offline mode.
  4. Download and install the memcache module.
  5. If you have previously been running the memcache module, run update.php.
@@ -39,7 +39,14 @@ is important.
  8. Make sure the following line also exists, to ensure that the special
     cache_form bin is assigned to non-volatile storage:
       $conf['cache_class_cache_form'] = 'DrupalDatabaseCache';
- 9. Bring your site back online.
+ 9. Optionally also add the following two lines to tell Drupal not to bootstrap
+    the database when serving cached pages to anonymous visitors:
+      $conf['page_cache_without_database'] = TRUE;
+      $conf['page_cache_invoke_hooks'] = FALSE;
+    If setting page_cache_without_database to TRUE, you also have to set
+    page_cache_invoke_hooks to FALSE or you'll see an error like "Fatal error:
+    Call to undefined function module_list()".
+10. Bring your site back online.
 
 For more detailed instructions on (1) and (2) above, please see the
 documentation online on drupal.org which includes links to external
@@ -141,14 +148,20 @@ Example 1:
 First, the most basic configuration which consists of one memcached instance
 running on localhost port 11211 and all caches except for cache_form being
 stored in memcache. We also enable stampede protection, and the memcache
-locking mechanism.
+locking mechanism. Finally, we tell Drupal to not bootstrap the database when
+serving cached pages to anonymous visitors.
 
   $conf['cache_backends'][] = 'sites/all/modules/memcache/memcache.inc';
   $conf['lock_inc'] = 'sites/all/modules/memcache/memcache-lock.inc';
   $conf['memcache_stampede_protection'] = TRUE;
   $conf['cache_default_class'] = 'MemCacheDrupal';
+
   // The 'cache_form' bin must be assigned to non-volatile storage.
   $conf['cache_class_cache_form'] = 'DrupalDatabaseCache';
+
+  // Don't bootstrap the database when serving pages from the cache.
+  $conf['page_cache_without_database'] = TRUE;
+  $conf['page_cache_invoke_hooks'] = FALSE;
 
 Note that no servers or bins are defined.  The default server and bin
 configuration which is used in this case is equivalant to setting:
@@ -181,6 +194,10 @@ sockets do not have ports.
   // The 'cache_form' bin must be assigned no non-volatile storage.
   $conf['cache_class_cache_form'] = 'DrupalDatabaseCache';
 
+  // Don't bootstrap the database when serving pages from the cache.
+  $conf['page_cache_without_database'] = TRUE;
+  $conf['page_cache_invoke_hooks'] = FALSE;
+
   // Important to define a default cluster in both the servers
   // and in the bins. This links them together.
   $conf['memcache_servers'] = array('10.1.1.1:11211' => 'default',
@@ -202,8 +219,13 @@ go to 'cluster2'. All other bins go to 'default'.
   $conf['lock_inc'] = 'sites/all/modules/memcache/memcache-lock.inc';
   $conf['memcache_stampede_protection'] = TRUE;
   $conf['cache_default_class'] = 'MemCacheDrupal';
+
   // The 'cache_form' bin must be assigned no non-volatile storage.
   $conf['cache_class_cache_form'] = 'DrupalDatabaseCache';
+
+  // Don't bootstrap the database when serving pages from the cache.
+  $conf['page_cache_without_database'] = TRUE;
+  $conf['page_cache_invoke_hooks'] = FALSE;
 
   $conf['memcache_servers'] = array('10.1.1.6:11211' => 'default',
                                     '10.1.1.6:11212' => 'default',
@@ -269,7 +291,7 @@ $conf['cache_default_class'] = 'MemCacheDrupal';
 
 // The 'cache_form' bin must be assigned no non-volatile storage.
 $conf['cache_class_cache_form'] = 'DrupalDatabaseCache';
-$conf['session_inc'] = './sites/all/modules/memcache/memcache-session.inc';
+$conf['session_inc'] = 'sites/all/modules/memcache/unstable/memcache-session.inc';
 
 $conf['memcache_servers'] = array(
     '10.1.1.1:11211' => 'default',
@@ -291,8 +313,71 @@ $conf['memcache_bins'] = array(
 ## TROUBLESHOOTING ##
 
 PROBLEM:
-Error:
-Failed to set key: Failed to set key: cache_page-......
+ Error:
+  Failed to load required file memcache/dmemcache.inc
+
+SOLUTION:
+You need to enable memcache in settings.php. Search for "Example 1" above
+for a basic configuration example.
+
+PROBLEM:
+ Error:
+  PECL !extension version %version is unsupported. Please update to
+  %recommended or newer.
+
+SOLUTION:
+Upgrade to the latest available PECL extension release. Older PECL extensions
+have known bugs and cause a variety of problems when using the memcache module.
+
+PROBLEM:
+ Error:
+  Failed to connect to memcached server instance at <IP ADDRESS>.
+
+SOLUTION:
+Verify that the memcached daemon is running at the specified IP and PORT. To
+debug you can try to telnet directly to the memcache server from your web
+servers, example:
+   telnet localhost 11211
+
+PROBLEM:
+ Error:
+  Failed to store to then retrieve data from memcache.
+
+SOLUTION:
+Carefully review your settings.php configuration against the above
+documentation. This error simply does a cache_set followed by a cache_get
+and confirms that what is written to the cache can then be read back again.
+This test was added in the 7.x-1.1 release.
+
+The following code is what performs this test -- you can wrap this in a <?php
+tag and execute as a script with 'drush scr' to perform further debugging.
+
+        $cid = 'memcache_requirements_test';
+        $value = 'OK';
+        // Temporarily store a test value in memcache.
+        cache_set($cid, $value, 'cache', 60);
+        // Retreive the test value from memcache.
+        $data = cache_get($cid);
+        if (!isset($data->data) || $data->data !== $value) {
+          echo t('Failed to store to then retrieve data from memcache.');
+        }
+        else {
+          // Test a delete as well.
+          cache_clear_all($cid, 'cache');
+        }
+
+PROBLEM:
+ Error:
+  Unexpected failure when testing memcache configuration.
+
+SOLUTION:
+Be sure the memcache module is properly installed, and that your settings.php
+configuration is correct. This error means an exception was thrown when
+attempting to write to and then read from memcache.
+
+PROBLEM:
+ Error:
+  Failed to set key: Failed to set key: cache_page-......
 
 SOLUTION:
 Upgrade your PECL library to PECL package (2.2.1) (or higher).
