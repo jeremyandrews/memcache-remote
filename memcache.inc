@@ -499,7 +499,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
     // memcache-remote custom logic.
     // If wildcards were lost since the cache item was stored, invalidate the
     // item and reset wildcards on the remote server.
-    elseif ($flushes > (int) $this->wildcard_flushes($cid)) {
+    elseif ($flushes > (int) $this->wildcardFlushes($cid)) {
       if (lock_acquire("memcache_sync_$this->bin")) {
         $this->wildcards($cid, FALSE, TRUE);
         lock_release("memcache_sync_$this->bin");
