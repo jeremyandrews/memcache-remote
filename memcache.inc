@@ -32,7 +32,10 @@ class MemCacheDrupal implements DrupalCacheInterface {
     // If page_cache_without_database is enabled, we have to manually load the
     // $conf array out of cache_bootstrap.
     static $variables_loaded = FALSE;
-    if (!empty($GLOBALS['conf']['page_cache_without_database']) && !$variables_loaded) {
+    // NOTE: We don't call drupal_get_bootstrap_phase() because this would
+    // break all 7.x Drupal installations prior to 7.33. For more information
+    // see https://www.drupal.org/node/667098.
+    if (drupal_bootstrap(NULL, FALSE) < DRUPAL_BOOTSTRAP_VARIABLES && !$variables_loaded) {
       global $conf;
       $variables_loaded = TRUE;
       // Try loading variables from cache. If that fails, we have to bootstrap
@@ -560,13 +563,20 @@ class MemCacheDrupal implements DrupalCacheInterface {
         // The module_implements cache is written after finishing the request.
         'module_implements',
         // Variables have their own lock protection.
-        'variables'
+        'variables',
+        // Both schema and the theme_registry uses DrupalCacheArray, which sets
+        // the cache entry with a class destructor.
+        'schema:runtime:*',
+        'theme_registry:runtime:*',
       ),
       // Disable stampede protection for cid prefix in 'cache'.
       'cache' => array(
         // I18n uses a class destructor to write the cache.
         'i18n:string:*',
       ),
+      // Disable stampede protection for the contrib cache_rules bin as recent
+      // versions of the rules module provides its own stampede protection.
+      'cache_rules',
     ));
 
     // Support ignoring an entire bin.

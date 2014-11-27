@@ -142,7 +142,9 @@ example:
     // Ignore some cids in 'cache_bootstrap'.
     'cache_bootstrap' => array(
       'module_implements',
-      'variables'
+      'variables',
+      'schema:runtime:*',
+      'theme_registry:runtime:*',
     ),
     // Ignore all cids in the 'cache' bin starting with 'i18n:string:'
     'cache' => array(
@@ -283,6 +285,14 @@ used, however sha1 was selected as the default because it performs quickly with
 minimal collisions.
 
 $conf['memcache_key_hash_algorithm'] = 'sha1';
+
+You can also tune the maximum key length BUT BE AWARE this doesn't affect
+memcached's server-side limitations -- this value is primarily exposed to allow
+you to further shrink the length of keys to optimize network performance.
+Specifying a length larger than 250 will almost certainly lead to problems
+unless you know what you're doing.
+
+$conf['memcache_key_max_length'] = 250;
 
 Visit http://www.php.net/manual/en/function.hash-algos.php to learn more about
 which hash algorithms are available.
