@@ -32,7 +32,10 @@ class MemCacheDrupal implements DrupalCacheInterface {
     // If page_cache_without_database is enabled, we have to manually load the
     // $conf array out of cache_bootstrap.
     static $variables_loaded = FALSE;
-    if (!empty($GLOBALS['conf']['page_cache_without_database']) && !$variables_loaded) {
+    // NOTE: We don't call drupal_get_bootstrap_phase() because this would
+    // break all 7.x Drupal installations prior to 7.33. For more information
+    // see https://www.drupal.org/node/667098.
+    if (drupal_bootstrap(NULL, FALSE) < DRUPAL_BOOTSTRAP_VARIABLES && !$variables_loaded) {
       global $conf;
       $variables_loaded = TRUE;
       // Try loading variables from cache. If that fails, we have to bootstrap
@@ -116,7 +119,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
         if (variable_get('memcache_stampede_protection', FALSE)) {
           // The process that acquires the lock will get a cache miss, all
           // others will get a cache hit.
-          if ($this->lockInit() && lock_acquire("memcache_$cid:$this->bin", variable_get('memcache_stampede_semaphore', 15))) {
+          if ($this->lockInit() && $this->stampedeProtected($cid) && lock_acquire("memcache_$cid:$this->bin", variable_get('memcache_stampede_semaphore', 15))) {
             $cache = FALSE;
           }
         }
@@ -158,7 +161,7 @@ class MemCacheDrupal implements DrupalCacheInterface {
     // memcache_stampede_protection variable is enabled.
     if (!$cache) {
       $this->misses[$cid] = TRUE;
-      if (variable_get('memcache_stampede_protection', FALSE) && $this->lockInit() && !lock_acquire("memcache_$cid:$this->bin", variable_get('memcache_stampede_semaphore', 15))) {
+      if (variable_get('memcache_stampede_protection', FALSE) && $this->lockInit() && $this->stampedeProtected($cid) && !lock_acquire("memcache_$cid:$this->bin", variable_get('memcache_stampede_semaphore', 15))) {
         // Prevent any single request from waiting more than three times due to
         // stampede protection. By default this is a maximum total wait of 15
         // seconds. This accounts for two possibilities - a cache and lock miss
@@ -529,6 +532,71 @@ class MemCacheDrupal implements DrupalCacheInterface {
     // enough to load the lock system.
     if (!function_exists('lock_acquire')) {
       drupal_bootstrap(DRUPAL_BOOTSTRAP_VARIABLES, FALSE);
+    }
+
+    return TRUE;
+  }
+
+  /**
+   * Determines whether stampede protection is enabled for a given bin/cid.
+   *
+   * Memcache stampede protection is primarily designed to benefit the following
+   * caching pattern: a miss on a cache_get for a specific cid is immediately
+   * followed by a cache_set for that cid. In cases where this pattern is not
+   * followed, stampede protection can be disabled to avoid long hanging locks.
+   * For example, a cache miss in Drupal core's module_implements() won't
+   * execute a cache_set until drupal_page_footer() calls
+   * module_implements_write_cache() which can occur much later in page
+   * generation.
+   *
+   * @param string $cid
+   *   The cache id of the data to retrieve.
+   *
+   * @return bool
+   *   Returns TRUE if stampede protection is enabled for that particular cache
+   *   bin/cid, otherwise FALSE.
+   */
+  protected function stampedeProtected($cid) {
+    $ignore_settings = variable_get('memcache_stampede_protection_ignore', array(
+      // Disable stampede protection for specific cids in 'cache_bootstrap'.
+      'cache_bootstrap' => array(
+        // The module_implements cache is written after finishing the request.
+        'module_implements',
+        // Variables have their own lock protection.
+        'variables',
+        // Both schema and the theme_registry uses DrupalCacheArray, which sets
+        // the cache entry with a class destructor.
+        'schema:runtime:*',
+        'theme_registry:runtime:*',
+      ),
+      // Disable stampede protection for cid prefix in 'cache'.
+      'cache' => array(
+        // I18n uses a class destructor to write the cache.
+        'i18n:string:*',
+      ),
+      // Disable stampede protection for the contrib cache_rules bin as recent
+      // versions of the rules module provides its own stampede protection.
+      'cache_rules',
+    ));
+
+    // Support ignoring an entire bin.
+    if (in_array($this->bin, $ignore_settings)) {
+      return FALSE;
+    }
+
+    // Support ignoring by cids.
+    if (isset($ignore_settings[$this->bin])) {
+      // Support ignoring specific cids.
+      if (in_array($cid, $ignore_settings[$this->bin])) {
+        return FALSE;
+      }
+      // Support ignoring cids starting with a suffix.
+      foreach ($ignore_settings[$this->bin] as $ignore) {
+        $split = explode('*', $ignore);
+        if (count($split) > 1 && strpos($cid, $split[0]) === 0) {
+          return FALSE;
+        }
+      }
     }
 
     return TRUE;
